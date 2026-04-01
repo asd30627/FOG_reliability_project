@@ -1,0 +1,9 @@
+source;share/pseudo_fog/hook/pythonpath.ps1
+source;share/pseudo_fog/hook/pythonpath.dsv
+source;share/pseudo_fog/hook/pythonpath.sh
+source;share/pseudo_fog/hook/ament_prefix_path.ps1
+source;share/pseudo_fog/hook/ament_prefix_path.dsv
+source;share/pseudo_fog/hook/ament_prefix_path.sh
+source;../../build/pseudo_fog/share/pseudo_fog/hook/pythonpath_develop.ps1
+source;../../build/pseudo_fog/share/pseudo_fog/hook/pythonpath_develop.dsv
+source;../../build/pseudo_fog/share/pseudo_fog/hook/pythonpath_develop.sh

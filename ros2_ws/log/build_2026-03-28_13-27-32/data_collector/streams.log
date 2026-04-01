@@ -1,0 +1,24 @@
+[0.428s] Invoking command in '/home/ivlab3/Lucas_ws/ros2_ws/build/data_collector': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/build --no-deps symlink_data
+[0.562s] running develop
+[0.637s] running egg_info
+[0.637s] creating data_collector.egg-info
+[0.645s] writing data_collector.egg-info/PKG-INFO
+[0.645s] writing dependency_links to data_collector.egg-info/dependency_links.txt
+[0.645s] writing entry points to data_collector.egg-info/entry_points.txt
+[0.645s] writing requirements to data_collector.egg-info/requires.txt
+[0.645s] writing top-level names to data_collector.egg-info/top_level.txt
+[0.645s] writing manifest file 'data_collector.egg-info/SOURCES.txt'
+[0.660s] reading manifest file 'data_collector.egg-info/SOURCES.txt'
+[0.660s] writing manifest file 'data_collector.egg-info/SOURCES.txt'
+[0.668s] running build_ext
+[0.668s] Creating /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/lib/python3.12/site-packages/data-collector.egg-link (link to .)
+[0.668s] Installing collector_node script to /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/lib/data_collector
+[0.669s] 
+[0.669s] Installed /home/ivlab3/Lucas_ws/ros2_ws/build/data_collector
+[0.669s] running symlink_data
+[0.669s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/share/ament_index
+[0.669s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/share/ament_index/resource_index
+[0.669s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/share/ament_index/resource_index/packages
+[0.669s] symbolically linking /home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/resource/data_collector -> /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/share/ament_index/resource_index/packages
+[0.669s] symbolically linking /home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/package.xml -> /home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/share/data_collector
+[0.687s] Invoked command in '/home/ivlab3/Lucas_ws/ros2_ws/build/data_collector' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ivlab3/Lucas_ws/ros2_ws/install/data_collector/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ivlab3/Lucas_ws/ros2_ws/build/data_collector/build --no-deps symlink_data

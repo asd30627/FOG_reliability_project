@@ -1,0 +1,4 @@
+[console_scripts]
+fog_compare_node = pseudo_fog.fog_compare_node:main
+fog_spec_check_node = pseudo_fog.fog_spec_check_node:main
+pseudo_fog_node = pseudo_fog.pseudo_fog_node:main

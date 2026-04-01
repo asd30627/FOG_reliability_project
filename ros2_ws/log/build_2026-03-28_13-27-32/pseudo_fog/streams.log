@@ -1,0 +1,26 @@
+[0.424s] Invoking command in '/home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/build --no-deps symlink_data
+[0.556s] running develop
+[0.631s] running egg_info
+[0.631s] creating pseudo_fog.egg-info
+[0.639s] writing pseudo_fog.egg-info/PKG-INFO
+[0.639s] writing dependency_links to pseudo_fog.egg-info/dependency_links.txt
+[0.639s] writing entry points to pseudo_fog.egg-info/entry_points.txt
+[0.639s] writing requirements to pseudo_fog.egg-info/requires.txt
+[0.639s] writing top-level names to pseudo_fog.egg-info/top_level.txt
+[0.639s] writing manifest file 'pseudo_fog.egg-info/SOURCES.txt'
+[0.654s] reading manifest file 'pseudo_fog.egg-info/SOURCES.txt'
+[0.654s] writing manifest file 'pseudo_fog.egg-info/SOURCES.txt'
+[0.662s] running build_ext
+[0.662s] Creating /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/python3.12/site-packages/pseudo-fog.egg-link (link to .)
+[0.662s] Installing fog_compare_node script to /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/pseudo_fog
+[0.662s] Installing fog_spec_check_node script to /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/pseudo_fog
+[0.663s] Installing pseudo_fog_node script to /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/pseudo_fog
+[0.663s] 
+[0.663s] Installed /home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog
+[0.663s] running symlink_data
+[0.663s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/share/ament_index
+[0.663s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/share/ament_index/resource_index
+[0.663s] creating /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/share/ament_index/resource_index/packages
+[0.663s] symbolically linking /home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/resource/pseudo_fog -> /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/share/ament_index/resource_index/packages
+[0.663s] symbolically linking /home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/package.xml -> /home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/share/pseudo_fog
+[0.678s] Invoked command in '/home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ivlab3/Lucas_ws/ros2_ws/install/pseudo_fog/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ivlab3/Lucas_ws/ros2_ws/build/pseudo_fog/build --no-deps symlink_data

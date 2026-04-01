@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: data-collector
+Version: 0.0.0
+Summary: ROS2 dataset collector for image, imu, odom, camera_info, and clock.
+Maintainer: ivlab3
+Maintainer-email: asd30627@gmail.com
+License: Apache-2.0

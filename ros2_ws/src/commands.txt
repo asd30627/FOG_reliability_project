@@ -1,0 +1,57 @@
+open isaac sim:
+isaacsim
+runapp
+export ROS_DOMAIN_ID=0
+ros2 topic pub /cmd_vel_2 geometry_msgs/Twist "{'linear': {'x': 1.0,'y': 0.0, 'z': 0.0}, 'angular': {'x': 0.0, 'y': 0.0, 'z': 0.0}}"
+
+ROS:
+ros2 run pseudo_fog fog_spec_check_node
+ros2 run data_collector collector_node --ros-args -p sequence_name:=sequence_001
+
+Visaul:
+conda activate gf
+python ~/Lucas_ws/Visual/keyframe_pipeline/keyframe_selector.py --sequence_dir /mnt/sata4t/dataset/sequence_001
+
+python feature_extractor.py \
+  --sequence_dir /mnt/sata4t/dataset/sequence_001 \
+  --save_match_vis \
+  --clean_output_dir
+  
+python build_reliability_dataset.py \
+  --sequence_dir /mnt/sata4t/dataset/sequence_001 \
+  --seq_len 8
+  
+python train_reliability_model.py \
+  --dataset_dir /mnt/sata4t/dataset/sequence_001/reliability_dataset \
+  --model_type gru \
+  --epochs 80
+
+python infer_reliability.py \
+  --sequence_dir /mnt/sata4t/dataset/sequence_001 \
+  --tau 0.5
+  
+python local_factor_graph_backend.py \
+  --sequence_dir /mnt/sata4t/dataset/sequence_001 \
+  --tau 0.5 \
+  --sim_rot_noise_deg 0.8 \
+  --sim_trans_noise_m 0.03
+  
+
+navigation:
+change parameter:
+/home/ivlab3/rgbd_ws/src/navigation2/nav2_bringup/params/
+cd rgbd_ws/
+source install/setup.bash 
+export ROS_DOMAIN_ID=0
+ros2 launch wavefront_explorer full_system.launch.py 
+
+orb-slam3:
+ros2 run orbslam3 rgbd /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/vocabulary/ORBvoc.txt.tar.gz /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/config/rgb-d/RealSense_D457.yaml
+
+terminal1:
+ros2 launch realsense2_camera rs_rgbd_launch.py
+terminal2:
+ros2 run orbslam3 rgbd /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/vocabulary/ORBvoc.txt /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/config/rgb-d/RealSense_D457.yaml
+
+
+
