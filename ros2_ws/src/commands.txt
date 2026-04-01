@@ -20,11 +20,6 @@ python feature_extractor.py \
 python build_reliability_dataset.py \
   --sequence_dir /mnt/sata4t/dataset/sequence_001 \
   --seq_len 8
-  
-python train_reliability_model.py \
-  --dataset_dir /mnt/sata4t/dataset/sequence_001/reliability_dataset \
-  --model_type gru \
-  --epochs 80
 
 python infer_reliability.py \
   --sequence_dir /mnt/sata4t/dataset/sequence_001 \
@@ -36,6 +31,13 @@ python local_factor_graph_backend.py \
   --sim_rot_noise_deg 0.8 \
   --sim_trans_noise_m 0.03
   
+python run_pipeline.py \
+  --sequence_dir /mnt/sata4t/dataset/sequence_001 \
+  --skip_feature_extraction \
+  --skip_dataset_build \
+  --skip_inference \
+  --model_type gru \
+  --epochs 80
 
 navigation:
 change parameter:
