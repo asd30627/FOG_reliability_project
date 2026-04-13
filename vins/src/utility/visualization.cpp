@@ -8,6 +8,8 @@
  *******************************************************/
 
 #include "visualization.h"
+#include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 // using namespace ros;
 using namespace Eigen;
@@ -24,7 +26,7 @@ rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_keyframe_point;
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_extrinsic;
 
 rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_image_track;
-
+std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 static double sum_of_path = 0;
 static Vector3d last_path(0.0, 0.0, 0.0);
@@ -48,6 +50,7 @@ void registerPub(rclcpp::Node::SharedPtr n)
 
     cameraposevisual.setScale(0.1);
     cameraposevisual.setLineWidth(0.01);
+    tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(n);
 }
 
 void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, const Eigen::Vector3d &V, double t)
@@ -55,7 +58,7 @@ void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, co
     nav_msgs::msg::Odometry odometry;
 
     int sec_ts = (int)t;
-    uint nsec_ts = (uint)((t - sec_ts) * 1e9);
+    uint32_t nsec_ts = (uint32_t)((t - sec_ts) * 1e9);
     odometry.header.stamp.sec = sec_ts;
     odometry.header.stamp.nanosec = nsec_ts;
 
@@ -139,7 +142,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header
         nav_msgs::msg::Odometry odometry;
         odometry.header = header;
         odometry.header.frame_id = "world";
-        odometry.child_frame_id = "world";
+        odometry.child_frame_id = "body";
         Quaterniond tmp_Q;
         tmp_Q = Quaterniond(estimator.Rs[WINDOW_SIZE]);
         odometry.pose.pose.position.x = estimator.Ps[WINDOW_SIZE].x();
@@ -319,103 +322,58 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &head
 
 void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
-    return; // tmp.
-
-
-    cout << "tf 1" << endl;
-    if( estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
+    if (estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
         return;
 
-    std::shared_ptr<tf2_ros::TransformBroadcaster> br;
-    geometry_msgs::msg::TransformStamped transform, transform_cam;
+    if (!tf_broadcaster)
+        return;
 
-    tf2::Quaternion q;
-    // body frame
-    Vector3d correct_t;
-    Quaterniond correct_q;
-    
-    cout << "tf 2" << endl;
-    correct_t = estimator.Ps[WINDOW_SIZE];
-    correct_q = estimator.Rs[WINDOW_SIZE];
+    geometry_msgs::msg::TransformStamped tf_world_body;
+    tf_world_body.header = header;
+    tf_world_body.header.frame_id = "world";
+    tf_world_body.child_frame_id = "body";
 
-    cout << "tf 3" << endl;
+    Vector3d body_t = estimator.Ps[WINDOW_SIZE];
+    Quaterniond body_q(estimator.Rs[WINDOW_SIZE]);
 
-    
-    cout << header.stamp.sec + header.stamp.nanosec * (1e-9) << endl;
-    cout << correct_t << endl;
-    cout << correct_q.w() << " " << correct_q.x() << " " << correct_q.y() << " " << correct_q.z() << endl;
+    tf_world_body.transform.translation.x = body_t.x();
+    tf_world_body.transform.translation.y = body_t.y();
+    tf_world_body.transform.translation.z = body_t.z();
+    tf_world_body.transform.rotation.x = body_q.x();
+    tf_world_body.transform.rotation.y = body_q.y();
+    tf_world_body.transform.rotation.z = body_q.z();
+    tf_world_body.transform.rotation.w = body_q.w();
 
+    tf_broadcaster->sendTransform(tf_world_body);
 
-    // transform.header.stamp = header.stamp;
-    transform.header.frame_id = "world";
-    transform.child_frame_id = "body";
+    geometry_msgs::msg::TransformStamped tf_body_camera;
+    tf_body_camera.header = header;
+    tf_body_camera.header.frame_id = "body";
+    tf_body_camera.child_frame_id = "camera";
 
-    transform.transform.translation.x = correct_t(0);
-    transform.transform.translation.y = correct_t(1);
-    transform.transform.translation.z = correct_t(2);
+    Quaterniond cam_q(estimator.ric[0]);
+    tf_body_camera.transform.translation.x = estimator.tic[0].x();
+    tf_body_camera.transform.translation.y = estimator.tic[0].y();
+    tf_body_camera.transform.translation.z = estimator.tic[0].z();
+    tf_body_camera.transform.rotation.x = cam_q.x();
+    tf_body_camera.transform.rotation.y = cam_q.y();
+    tf_body_camera.transform.rotation.z = cam_q.z();
+    tf_body_camera.transform.rotation.w = cam_q.w();
 
-    cout << "tf 4" << endl;
+    tf_broadcaster->sendTransform(tf_body_camera);
 
-
-    q.setW(correct_q.w());
-    q.setX(correct_q.x());
-    q.setY(correct_q.y());
-    q.setZ(correct_q.z());
-    transform.transform.rotation.x = q.x();
-    transform.transform.rotation.y = q.y();
-    transform.transform.rotation.z = q.z();
-    transform.transform.rotation.w = q.w();
-
-    cout << "tf 5" << endl;
-
-    br->sendTransform(transform);
-
-
-    cout << "tf 6" << endl;
-
-
-
-    // camera frame
-    transform_cam.header.stamp = header.stamp;
-    transform_cam.header.frame_id = "body";
-    transform_cam.child_frame_id = "camera";
-
-
-    transform_cam.transform.translation.x = estimator.tic[0].x();
-    transform_cam.transform.translation.y = estimator.tic[0].y();
-    transform_cam.transform.translation.z = estimator.tic[0].z();
-
-    q.setW(Quaterniond(estimator.ric[0]).w());
-    q.setX(Quaterniond(estimator.ric[0]).x());
-    q.setY(Quaterniond(estimator.ric[0]).y());
-    q.setZ(Quaterniond(estimator.ric[0]).z());
-
-    transform_cam.transform.rotation.x = q.x();
-    transform_cam.transform.rotation.y = q.y();
-    transform_cam.transform.rotation.z = q.z();
-    transform_cam.transform.rotation.w = q.w();
-
-    // br->sendTransform(transform_cam);
-
-    cout << "tf 7" << endl;
-
-    
     nav_msgs::msg::Odometry odometry;
     odometry.header = header;
-    odometry.header.frame_id = "world";
+    odometry.header.frame_id = "body";
+    odometry.child_frame_id = "camera";
     odometry.pose.pose.position.x = estimator.tic[0].x();
     odometry.pose.pose.position.y = estimator.tic[0].y();
     odometry.pose.pose.position.z = estimator.tic[0].z();
-    Quaterniond tmp_q{estimator.ric[0]};
-    odometry.pose.pose.orientation.x = tmp_q.x();
-    odometry.pose.pose.orientation.y = tmp_q.y();
-    odometry.pose.pose.orientation.z = tmp_q.z();
-    odometry.pose.pose.orientation.w = tmp_q.w();
-
-    cout << "tf 8" << endl;
+    odometry.pose.pose.orientation.x = cam_q.x();
+    odometry.pose.pose.orientation.y = cam_q.y();
+    odometry.pose.pose.orientation.z = cam_q.z();
+    odometry.pose.pose.orientation.w = cam_q.w();
     pub_extrinsic->publish(odometry);
-    cout << "tf 9" << endl;
-
 }
 
 

@@ -15,7 +15,7 @@
 #include <thread>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include "estimator/estimator.h"
 #include "estimator/parameters.h"
@@ -240,19 +240,26 @@ void cam_switch_callback(const std_msgs::msg::Bool::SharedPtr switch_msg)
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-	auto n = rclcpp::Node::make_shared("vins_estimator");
-    // ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
 
-    if(argc != 2)
+    // 把 ROS2 自己的參數（例如 --ros-args -p use_sim_time:=true）先濾掉
+    std::vector<std::string> nonros_args = rclcpp::remove_ros_arguments(argc, argv);
+
+    if (nonros_args.size() != 2)
     {
-        printf("please intput: rosrun vins vins_node [config file] \n"
-               "for example: rosrun vins vins_node "
-               "~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
+        printf("please input: ros2 run vins vins_node [config file]\n"
+               "for example: ros2 run vins vins_node "
+               "~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/euroc/euroc_mono_imu_config.yaml\n");
         return 1;
     }
 
-    string config_file = argv[1];
-    printf("config_file: %s\n", argv[1]);
+    // 讓 command line 傳進來的參數 override（例如 use_sim_time）自動宣告
+    auto options = rclcpp::NodeOptions()
+                       .automatically_declare_parameters_from_overrides(true);
+
+    auto n = rclcpp::Node::make_shared("vins_estimator", options);
+
+    std::string config_file = nonros_args[1];
+    printf("config_file: %s\n", config_file.c_str());
 
     readParameters(config_file);
     estimator.setParameter();
@@ -265,24 +272,46 @@ int main(int argc, char **argv)
 
     registerPub(n);
 
-
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu = NULL;
-    if(USE_IMU)
+    if (USE_IMU)
     {
-        sub_imu = n->create_subscription<sensor_msgs::msg::Imu>(IMU_TOPIC, rclcpp::QoS(rclcpp::KeepLast(2000)), imu_callback);
+        sub_imu = n->create_subscription<sensor_msgs::msg::Imu>(
+            IMU_TOPIC, rclcpp::QoS(rclcpp::KeepLast(2000)), imu_callback);
     }
-    auto sub_feature = n->create_subscription<sensor_msgs::msg::PointCloud>("/feature_tracker/feature", rclcpp::QoS(rclcpp::KeepLast(2000)), feature_callback);
-    auto sub_img0 = n->create_subscription<sensor_msgs::msg::Image>(IMAGE0_TOPIC, rclcpp::QoS(rclcpp::KeepLast(100)), img0_callback);
-    
+
+    // auto sub_feature = n->create_subscription<sensor_msgs::msg::PointCloud>(
+    //     "/feature_tracker/feature",
+    //     rclcpp::QoS(rclcpp::KeepLast(2000)),
+    //     feature_callback);
+
+    auto sub_img0 = n->create_subscription<sensor_msgs::msg::Image>(
+        IMAGE0_TOPIC,
+        rclcpp::QoS(rclcpp::KeepLast(100)),
+        img0_callback);
+
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img1 = NULL;
-    if(STEREO)
+    if (STEREO)
     {
-        sub_img1 = n->create_subscription<sensor_msgs::msg::Image>(IMAGE1_TOPIC, rclcpp::QoS(rclcpp::KeepLast(100)), img1_callback);
+        sub_img1 = n->create_subscription<sensor_msgs::msg::Image>(
+            IMAGE1_TOPIC,
+            rclcpp::QoS(rclcpp::KeepLast(100)),
+            img1_callback);
     }
-    
-    auto sub_restart = n->create_subscription<std_msgs::msg::Bool>("/vins_restart", rclcpp::QoS(rclcpp::KeepLast(100)), restart_callback);
-    auto sub_imu_switch = n->create_subscription<std_msgs::msg::Bool>("/vins_imu_switch", rclcpp::QoS(rclcpp::KeepLast(100)), imu_switch_callback);
-    auto sub_cam_switch = n->create_subscription<std_msgs::msg::Bool>("/vins_cam_switch", rclcpp::QoS(rclcpp::KeepLast(100)), cam_switch_callback);
+
+    auto sub_restart = n->create_subscription<std_msgs::msg::Bool>(
+        "/vins_restart",
+        rclcpp::QoS(rclcpp::KeepLast(100)),
+        restart_callback);
+
+    auto sub_imu_switch = n->create_subscription<std_msgs::msg::Bool>(
+        "/vins_imu_switch",
+        rclcpp::QoS(rclcpp::KeepLast(100)),
+        imu_switch_callback);
+
+    auto sub_cam_switch = n->create_subscription<std_msgs::msg::Bool>(
+        "/vins_cam_switch",
+        rclcpp::QoS(rclcpp::KeepLast(100)),
+        cam_switch_callback);
 
     std::thread sync_thread{sync_process};
     rclcpp::spin(n);
