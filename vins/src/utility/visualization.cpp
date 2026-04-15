@@ -10,6 +10,15 @@
 #include "visualization.h"
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <filesystem>
+namespace fs = std::filesystem;
+
+static inline void ensure_parent_dir(const std::string &file_path)
+{
+    fs::path p(file_path);
+    if (p.has_parent_path())
+        fs::create_directories(p.parent_path());
+}
 
 // using namespace ros;
 using namespace Eigen;
@@ -101,6 +110,7 @@ void printStatistics(const Estimator &estimator, double t)
     // ROS_DEBUG_STREAM("orientation: " << estimator.Vs[WINDOW_SIZE].transpose());
     if (ESTIMATE_EXTRINSIC)
     {
+        ensure_parent_dir(EX_CALIB_RESULT_PATH);
         cv::FileStorage fs(EX_CALIB_RESULT_PATH, cv::FileStorage::WRITE);
         for (int i = 0; i < NUM_OF_CAM; i++)
         {
@@ -167,9 +177,10 @@ void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header
         pub_path->publish(path);
 
         // write result to file
+        ensure_parent_dir(VINS_RESULT_PATH);
         ofstream foutC(VINS_RESULT_PATH, ios::app);
         foutC.setf(ios::fixed, ios::floatfield);
-        foutC.precision(0);
+        foutC.precision(9);
         foutC << header.stamp.sec + header.stamp.nanosec * (1e-9) << ",";
         foutC.precision(5);
         foutC << estimator.Ps[WINDOW_SIZE].x() << ","

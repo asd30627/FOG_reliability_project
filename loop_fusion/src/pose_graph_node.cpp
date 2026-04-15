@@ -35,6 +35,10 @@
 #include "utility/CameraPoseVisualization.h"
 // #include "camodocal/camera_models/CameraFactory.h"
 #include "parameters.h"
+
+#include <filesystem>
+namespace fs = std::filesystem;
+
 #define SKIP_FIRST_CNT 10
 using namespace std;
 
@@ -76,6 +80,13 @@ Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
 
 rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_point_cloud, pub_margin_cloud;
+
+static inline void ensure_parent_dir(const std::string &file_path)
+{
+    fs::path p(file_path);
+    if (p.has_parent_path())
+        fs::create_directories(p.parent_path());
+}
 
 void new_sequence()
 {
@@ -419,16 +430,16 @@ int main(int argc, char **argv)
     SKIP_CNT = 0;
     SKIP_DIS = 0;
 
-    if(argc != 2)
+    if (argc < 2)
     {
-        printf("please intput: rosrun loop_fusion loop_fusion_node [config file] \n"
-               "for example: rosrun loop_fusion loop_fusion_node "
-               "/home/tony-ws1/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
+        printf("usage: ros2 run loop_fusion loop_fusion_node <config_file>\n");
         return 0;
     }
-    
+
     string config_file = argv[1];
-    printf("config_file: %s\n", argv[1]);
+    printf("config_file: %s\n", config_file.c_str());
+    
+   
 
     cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
     if(!fsSettings.isOpened())
@@ -469,6 +480,7 @@ int main(int argc, char **argv)
 
     LOAD_PREVIOUS_POSE_GRAPH = fsSettings["load_previous_pose_graph"];
     VINS_RESULT_PATH = VINS_RESULT_PATH + "/vio_loop.csv";
+    ensure_parent_dir(VINS_RESULT_PATH);
     std::ofstream fout(VINS_RESULT_PATH, std::ios::out);
     fout.close();
 
