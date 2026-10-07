@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from matcher import LightGlueMatcher
-from feature_extractor import (
+from keyframe_pipeline.extract_features import (
     load_camera_matrix,
     compute_odom_relative_pose,
     estimate_visual_geometry,

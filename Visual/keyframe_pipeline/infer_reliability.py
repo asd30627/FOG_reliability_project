@@ -2,13 +2,64 @@ import argparse
 import csv
 import json
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
-from build_reliability_dataset import NONNEGATIVE_FEATURES
+from build_reliability_dataset import NONNEGATIVE_FEATURES, CLASS_ID_TO_NAME
 from train_reliability_model import build_model
 
+
+# =========================================================
+# 基本工具
+# =========================================================
+
+def read_csv_rows(path: Path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return list(csv.DictReader(f))
+
+
+def to_float(value, default=np.nan):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def to_int(value, default=-1):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def to_str(value, default=''):
+    if value is None:
+        return default
+    return str(value)
+
+
+def softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    x = x - np.max(x, axis=axis, keepdims=True)
+    e = np.exp(x)
+    s = np.sum(e, axis=axis, keepdims=True)
+    s = np.clip(s, 1e-12, None)
+    return e / s
+
+
+def is_valid_feature_value(name: str, value: float) -> bool:
+    if not np.isfinite(value):
+        return False
+    if name in NONNEGATIVE_FEATURES and value < 0.0:
+        return False
+    return True
+
+
+# =========================================================
+# Inferencer
+# =========================================================
 
 class ReliabilityInferencer:
     def __init__(
@@ -18,45 +69,73 @@ class ReliabilityInferencer:
         dataset_dir='',
         checkpoint='',
         out_dir='',
+        label_csv='',
         tau=0.5,
+        helpful_prob_thr=0.5,
         batch_size=256,
         device=None,
+
+        # fallback model config if model_config.json 不存在
+        model_type='gru',
+        hidden_dim=64,
+        num_layers=1,
+        dropout=0.10,
+        num_classes=3,
     ):
         self.sequence_dir = Path(sequence_dir).expanduser().resolve()
-        self.feature_csv = Path(feature_csv).expanduser().resolve() if feature_csv else self.sequence_dir / 'features' / 'local_visual_features.csv'
-        self.dataset_dir = Path(dataset_dir).expanduser().resolve() if dataset_dir else self.sequence_dir / 'reliability_dataset'
-        self.checkpoint = Path(checkpoint).expanduser().resolve() if checkpoint else self.dataset_dir / 'model_runs' / 'gru' / 'best.pt'
+        self.feature_csv = (
+            Path(feature_csv).expanduser().resolve()
+            if feature_csv
+            else self.sequence_dir / 'features' / 'all_candidate_features.csv'
+        )
+        self.dataset_dir = (
+            Path(dataset_dir).expanduser().resolve()
+            if dataset_dir
+            else self.sequence_dir / 'reliability_dataset'
+        )
         self.out_dir = Path(out_dir).expanduser().resolve() if out_dir else self.sequence_dir / 'reliability_inference'
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.checkpoint = (
+            Path(checkpoint).expanduser().resolve()
+            if checkpoint
+            else self.dataset_dir / 'model_runs' / model_type / 'best.pt'
+        )
+        self.model_config_json = self.checkpoint.parent / 'model_config.json'
+        self.stats_json = self.dataset_dir / 'dataset_stats.json'
+
+        self.label_csv = (
+            Path(label_csv).expanduser().resolve()
+            if label_csv
+            else self.sequence_dir / 'reliability_labels' / 'reliability_labels.csv'
+        )
 
         self.tau = float(tau)
+        self.helpful_prob_thr = float(helpful_prob_thr)
         self.batch_size = int(batch_size)
         self.device = torch.device(device if device is not None else ('cuda' if torch.cuda.is_available() else 'cpu'))
 
-        self.stats_json = self.dataset_dir / 'dataset_stats.json'
-        self.debug_csv = self.dataset_dir / 'feature_debug_with_target.csv'
+        self.fallback_model_type = str(model_type)
+        self.fallback_hidden_dim = int(hidden_dim)
+        self.fallback_num_layers = int(num_layers)
+        self.fallback_dropout = float(dropout)
+        self.fallback_num_classes = int(num_classes)
 
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.feature_names = None
+        self.fill_values = None
+        self.mean = None
+        self.std = None
+        self.seq_len = None
 
-    @staticmethod
-    def read_csv_rows(path: Path):
-        with open(path, 'r', encoding='utf-8') as f:
-            return list(csv.DictReader(f))
+        self.model_type = None
+        self.hidden_dim = None
+        self.num_layers = None
+        self.dropout = None
+        self.num_classes = None
 
-    @staticmethod
-    def to_float(value, default=np.nan):
-        try:
-            return float(value)
-        except Exception:
-            return default
-
-    @staticmethod
-    def is_valid_feature_value(name: str, value: float) -> bool:
-        if not np.isfinite(value):
-            return False
-        if name in NONNEGATIVE_FEATURES and value < 0.0:
-            return False
-        return True
-
+    # -----------------------------------------------------
+    # loading metadata
+    # -----------------------------------------------------
     def check_required_files(self):
         if not self.feature_csv.exists():
             raise FileNotFoundError(f'找不到 feature_csv: {self.feature_csv}')
@@ -65,37 +144,90 @@ class ReliabilityInferencer:
         if not self.checkpoint.exists():
             raise FileNotFoundError(f'找不到 checkpoint: {self.checkpoint}')
 
+    def load_stats_and_model_config(self):
+        with open(self.stats_json, 'r', encoding='utf-8') as f:
+            stats = json.load(f)
+
+        self.feature_names = list(stats['feature_names'])
+        self.fill_values = dict(stats['fill_values'])
+        self.mean = np.asarray(stats['mean'], dtype=np.float32)
+        self.std = np.asarray(stats['std'], dtype=np.float32)
+        self.std = np.where(self.std < 1e-6, 1.0, self.std).astype(np.float32)
+        self.seq_len = int(stats['seq_len'])
+
+        if self.model_config_json.exists():
+            with open(self.model_config_json, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+
+            self.model_type = str(cfg.get('model_type', self.fallback_model_type))
+            self.hidden_dim = int(cfg.get('hidden_dim', self.fallback_hidden_dim))
+            self.num_layers = int(cfg.get('num_layers', self.fallback_num_layers))
+            self.dropout = float(cfg.get('dropout', self.fallback_dropout))
+            self.num_classes = int(cfg.get('num_classes', self.fallback_num_classes))
+        else:
+            self.model_type = self.fallback_model_type
+            self.hidden_dim = self.fallback_hidden_dim
+            self.num_layers = self.fallback_num_layers
+            self.dropout = self.fallback_dropout
+            self.num_classes = self.fallback_num_classes
+
+    def load_label_map(self) -> Dict[int, Dict[str, object]]:
+        if not self.label_csv.exists():
+            return {}
+
+        rows = read_csv_rows(self.label_csv)
+        label_map = {}
+
+        for row in rows:
+            pair_id = to_int(row.get('pair_id', -1), -1)
+            if pair_id < 0:
+                continue
+
+            label_map[pair_id] = {
+                'label_reg': to_float(row.get('label_reg', np.nan), np.nan),
+                'label_cls': to_int(row.get('label_cls', -1), -1),
+                'class_name': to_str(row.get('class_name', '')),
+                'label_source': to_str(row.get('label_source', '')),
+            }
+
+        return label_map
+
+    # -----------------------------------------------------
+    # feature table
+    # -----------------------------------------------------
     def build_feature_table(self, rows, feature_names):
-        rows_sorted = sorted(rows, key=lambda r: int(self.to_float(r.get('pair_id', 0), 0)))
+        rows_sorted = sorted(rows, key=lambda r: int(to_float(r.get('pair_id', 0), 0)))
 
         pair_ids = []
         meta = {}
         cols = {name: [] for name in feature_names}
 
         for row in rows_sorted:
-            pid = int(self.to_float(row.get('pair_id', 0), 0))
+            pid = int(to_float(row.get('pair_id', 0), 0))
             pair_ids.append(pid)
 
             meta[pid] = {
                 'pair_id': pid,
-                'kf_prev_id': int(self.to_float(row.get('kf_prev_id', -1), -1)),
-                'kf_curr_id': int(self.to_float(row.get('kf_curr_id', -1), -1)),
-                'src_prev_id': int(self.to_float(row.get('src_prev_id', -1), -1)),
-                'src_curr_id': int(self.to_float(row.get('src_curr_id', -1), -1)),
+                'kf_prev_id': int(to_float(row.get('kf_prev_id', -1), -1)),
+                'kf_curr_id': int(to_float(row.get('kf_curr_id', -1), -1)),
+                'src_prev_id': int(to_float(row.get('src_prev_id', -1), -1)),
+                'src_curr_id': int(to_float(row.get('src_curr_id', -1), -1)),
                 'image_prev': row.get('image_prev', ''),
                 'image_curr': row.get('image_curr', ''),
                 'timestamp_prev': row.get('timestamp_prev', ''),
                 'timestamp_curr': row.get('timestamp_curr', ''),
+                'accepted': int(to_float(row.get('accepted', -1), -1)),
+                'reason': row.get('reason', ''),
             }
 
             for name in feature_names:
                 if name.startswith('valid_'):
                     base_name = name[len('valid_'):]
-                    v = self.to_float(row.get(base_name, np.nan), np.nan)
-                    cols[name].append(1.0 if self.is_valid_feature_value(base_name, v) else 0.0)
+                    v = to_float(row.get(base_name, np.nan), np.nan)
+                    cols[name].append(1.0 if is_valid_feature_value(base_name, v) else 0.0)
                 else:
-                    v = self.to_float(row.get(name, np.nan), np.nan)
-                    cols[name].append(v if self.is_valid_feature_value(name, v) else np.nan)
+                    v = to_float(row.get(name, np.nan), np.nan)
+                    cols[name].append(v if is_valid_feature_value(name, v) else np.nan)
 
         table = {
             'pair_ids': np.array(pair_ids, dtype=np.int32),
@@ -107,8 +239,7 @@ class ReliabilityInferencer:
 
         return table
 
-    @staticmethod
-    def apply_fill_values(table, feature_names, fill_values):
+    def apply_fill_values(self, table, feature_names, fill_values):
         X_cols = []
 
         for name in feature_names:
@@ -124,8 +255,12 @@ class ReliabilityInferencer:
 
         return np.concatenate(X_cols, axis=1).astype(np.float32)
 
-    @staticmethod
-    def build_sequences(X, pair_ids, seq_len):
+    def standardize_features(self, X):
+        mean = self.mean.reshape(1, -1)
+        std = self.std.reshape(1, -1)
+        return ((X - mean) / std).astype(np.float32)
+
+    def build_sequences(self, X, pair_ids, seq_len):
         xs = []
         seq_meta = []
 
@@ -136,6 +271,7 @@ class ReliabilityInferencer:
             seq_meta.append({
                 'start_pair_id': int(pair_ids[start_idx]),
                 'end_pair_id': int(pair_ids[end_idx]),
+                'start_index': int(start_idx),
                 'end_index': int(end_idx),
             })
 
@@ -144,224 +280,353 @@ class ReliabilityInferencer:
 
         return np.stack(xs).astype(np.float32), seq_meta
 
-    @staticmethod
-    def standardize_sequences(X_seq, mean, std):
-        mean = np.asarray(mean, dtype=np.float32).reshape(1, 1, -1)
-        std = np.asarray(std, dtype=np.float32).reshape(1, 1, -1)
-        std = np.where(std < 1e-6, 1.0, std)
-        return ((X_seq - mean) / std).astype(np.float32)
-
-    def load_soft_target_map(self):
-        if not self.debug_csv.exists():
-            return {}
-
-        rows = self.read_csv_rows(self.debug_csv)
-        target_map = {}
-
-        for row in rows:
-            pid = int(self.to_float(row.get('pair_id', -1), -1))
-            if pid < 0:
-                continue
-            target_map[pid] = float(self.to_float(row.get('soft_target', np.nan), np.nan))
-
-        return target_map
-
-    def infer_in_batches(self, model, X_seq):
-        model.eval()
-        preds = []
-
-        with torch.no_grad():
-            for start in range(0, len(X_seq), self.batch_size):
-                end = min(start + self.batch_size, len(X_seq))
-                xb = torch.from_numpy(X_seq[start:end]).float().to(self.device)
-                pred = model(xb).detach().cpu().numpy()
-                preds.append(pred)
-
-        if len(preds) == 0:
-            return np.array([], dtype=np.float32)
-
-        preds = np.concatenate(preds, axis=0).astype(np.float32).reshape(-1)
-        preds = np.clip(preds, 0.0, 1.0)
-        return preds
-
-    def load_stats_and_checkpoint(self):
-        with open(self.stats_json, 'r', encoding='utf-8') as f:
-            stats = json.load(f)
-
-        ckpt = torch.load(self.checkpoint, map_location=self.device)
-
-        feature_names = ckpt.get('feature_names', stats['feature_names'])
-        seq_len = int(ckpt['seq_len'])
-        input_dim = int(ckpt['input_dim'])
-        hidden_dim = int(ckpt['hidden_dim'])
-        num_layers = int(ckpt['num_layers'])
-        dropout = float(ckpt['dropout'])
-        model_type = str(ckpt['model_type'])
-
-        if len(feature_names) != input_dim:
-            raise ValueError(
-                f'checkpoint 內 input_dim={input_dim}，但 feature_names 數量={len(feature_names)}，不一致'
-            )
-
-        if len(stats['standardize_mean']) != len(feature_names):
-            raise ValueError(
-                f'standardize_mean 長度={len(stats["standardize_mean"])}, '
-                f'feature_names 長度={len(feature_names)}，不一致'
-            )
-
-        if len(stats['standardize_std']) != len(feature_names):
-            raise ValueError(
-                f'standardize_std 長度={len(stats["standardize_std"])}, '
-                f'feature_names 長度={len(feature_names)}，不一致'
-            )
-
-        return {
-            'stats': stats,
-            'ckpt': ckpt,
-            'feature_names': feature_names,
-            'seq_len': seq_len,
-            'input_dim': input_dim,
-            'hidden_dim': hidden_dim,
-            'num_layers': num_layers,
-            'dropout': dropout,
-            'model_type': model_type,
-        }
-
-    def build_model_from_checkpoint(self, meta):
+    # -----------------------------------------------------
+    # model inference
+    # -----------------------------------------------------
+    def build_model(self, input_dim):
         model = build_model(
-            model_type=meta['model_type'],
-            seq_len=meta['seq_len'],
-            input_dim=meta['input_dim'],
-            hidden_dim=meta['hidden_dim'],
-            num_layers=meta['num_layers'],
-            dropout=meta['dropout'],
+            model_type=self.model_type,
+            seq_len=self.seq_len,
+            input_dim=input_dim,
+            hidden_dim=self.hidden_dim,
+            num_layers=self.num_layers,
+            dropout=self.dropout,
+            num_classes=self.num_classes,
         ).to(self.device)
-
-        model.load_state_dict(meta['ckpt']['model_state_dict'])
         return model
 
-    def save_prediction_csv(self, out_csv, seq_meta, table, preds):
-        soft_target_map = self.load_soft_target_map()
+    @torch.no_grad()
+    def infer_in_batches(self, model, X_seq):
+        model.eval()
 
-        with open(out_csv, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'sample_index',
-                'start_pair_id',
-                'end_pair_id',
-                'kf_prev_id',
-                'kf_curr_id',
-                'src_prev_id',
-                'src_curr_id',
-                'image_prev',
-                'image_curr',
-                'timestamp_prev',
-                'timestamp_curr',
-                'w_pred',
-                'gate_pass',
-                'soft_target_proxy',
-            ])
+        regs = []
+        logits_list = []
 
-            for i, meta in enumerate(seq_meta):
-                end_pid = meta['end_pair_id']
-                pair_meta = table['meta'][end_pid]
-                w_pred = float(preds[i])
+        for start in range(0, len(X_seq), self.batch_size):
+            end = min(start + self.batch_size, len(X_seq))
+            xb = torch.from_numpy(X_seq[start:end]).float().to(self.device)
 
-                writer.writerow([
-                    i,
-                    meta['start_pair_id'],
-                    end_pid,
-                    pair_meta['kf_prev_id'],
-                    pair_meta['kf_curr_id'],
-                    pair_meta['src_prev_id'],
-                    pair_meta['src_curr_id'],
-                    pair_meta['image_prev'],
-                    pair_meta['image_curr'],
-                    pair_meta['timestamp_prev'],
-                    pair_meta['timestamp_curr'],
-                    w_pred,
-                    int(w_pred >= self.tau),
-                    soft_target_map.get(end_pid, np.nan),
-                ])
+            outputs = model(xb, return_dict=True)
+            pred_reg = outputs['reg'].detach().cpu().numpy().astype(np.float32).reshape(-1)
+            cls_logits = outputs['cls_logits'].detach().cpu().numpy().astype(np.float32)
 
-    def save_summary(self, preds):
+            regs.append(pred_reg)
+            logits_list.append(cls_logits)
+
+        if len(regs) == 0:
+            return (
+                np.array([], dtype=np.float32),
+                np.empty((0, self.num_classes), dtype=np.float32),
+            )
+
+        regs = np.concatenate(regs, axis=0).astype(np.float32).reshape(-1)
+        regs = np.clip(regs, 0.0, 1.0)
+
+        logits = np.concatenate(logits_list, axis=0).astype(np.float32)
+        return regs, logits
+
+    # -----------------------------------------------------
+    # output
+    # -----------------------------------------------------
+    def run(self):
+        self.check_required_files()
+        self.load_stats_and_model_config()
+
+        feature_rows = read_csv_rows(self.feature_csv)
+        table = self.build_feature_table(feature_rows, self.feature_names)
+
+        X = self.apply_fill_values(table, self.feature_names, self.fill_values)
+        X = self.standardize_features(X)
+
+        pair_ids = table['pair_ids']
+        X_seq, seq_meta = self.build_sequences(X, pair_ids, self.seq_len)
+
+        model = self.build_model(input_dim=X.shape[1])
+        state_dict = torch.load(self.checkpoint, map_location=self.device)
+        model.load_state_dict(state_dict)
+
+        pred_reg, cls_logits = self.infer_in_batches(model, X_seq)
+        probs = softmax_np(cls_logits, axis=1) if len(cls_logits) > 0 else np.empty((0, self.num_classes), dtype=np.float32)
+        pred_cls = np.argmax(probs, axis=1).astype(np.int64) if len(probs) > 0 else np.array([], dtype=np.int64)
+
+        label_map = self.load_label_map()
+
+        # 先建立一個 pair_id -> prediction 的 map
+        pred_map = {}
+        for i, meta in enumerate(seq_meta):
+            end_pair_id = int(meta['end_pair_id'])
+
+            p_harmful = float(probs[i, 0]) if self.num_classes >= 1 else np.nan
+            p_neutral = float(probs[i, 1]) if self.num_classes >= 2 else np.nan
+            p_helpful = float(probs[i, 2]) if self.num_classes >= 3 else np.nan
+
+            gate_pass_tau = int(float(pred_reg[i]) >= self.tau)
+            gate_pass_helpful_prob = int(np.isfinite(p_helpful) and p_helpful >= self.helpful_prob_thr)
+            pred_class_id = int(pred_cls[i])
+            pred_class_name = CLASS_ID_TO_NAME.get(pred_class_id, f'class_{pred_class_id}')
+            gate_pass_by_class = int(pred_class_name == 'helpful')
+
+            pred_map[end_pair_id] = {
+                'has_prediction': 1,
+                'start_pair_id': int(meta['start_pair_id']),
+                'end_pair_id': int(end_pair_id),
+                'w_pred': float(pred_reg[i]),
+
+                'pred_class_id': int(pred_class_id),
+                'pred_class': str(pred_class_name),
+
+                'p_harmful': float(p_harmful),
+                'p_neutral': float(p_neutral),
+                'p_helpful': float(p_helpful),
+
+                # backward compatibility
+                'gate_pass': int(gate_pass_tau),
+                'soft_target_proxy': float(label_map.get(end_pair_id, {}).get('label_reg', np.nan)),
+
+                # extra gates
+                'gate_pass_tau': int(gate_pass_tau),
+                'gate_pass_helpful_prob': int(gate_pass_helpful_prob),
+                'gate_pass_by_class': int(gate_pass_by_class),
+            }
+
+        # 對所有 pair 都輸出一列；前 seq_len-1 筆沒有 prediction
+        out_rows = []
+        for pid in pair_ids.tolist():
+            meta = table['meta'][int(pid)]
+            base = {
+                'pair_id': int(pid),
+                'start_pair_id': -1,
+                'end_pair_id': int(pid),
+
+                'kf_prev_id': int(meta['kf_prev_id']),
+                'kf_curr_id': int(meta['kf_curr_id']),
+                'src_prev_id': int(meta['src_prev_id']),
+                'src_curr_id': int(meta['src_curr_id']),
+                'image_prev': meta['image_prev'],
+                'image_curr': meta['image_curr'],
+                'timestamp_prev': meta['timestamp_prev'],
+                'timestamp_curr': meta['timestamp_curr'],
+                'accepted': int(meta['accepted']),
+                'reason': meta['reason'],
+
+                'has_prediction': 0,
+                'w_pred': np.nan,
+                'pred_class_id': -1,
+                'pred_class': '',
+
+                'p_harmful': np.nan,
+                'p_neutral': np.nan,
+                'p_helpful': np.nan,
+
+                # backward compatibility
+                'gate_pass': 0,
+                'soft_target_proxy': np.nan,
+
+                'gate_pass_tau': 0,
+                'gate_pass_helpful_prob': 0,
+                'gate_pass_by_class': 0,
+
+                'label_reg_gt': np.nan,
+                'label_cls_gt': -1,
+                'label_class_name_gt': '',
+                'label_source_gt': '',
+            }
+
+            if int(pid) in pred_map:
+                base.update(pred_map[int(pid)])
+
+            if int(pid) in label_map:
+                gt = label_map[int(pid)]
+                base['label_reg_gt'] = float(gt.get('label_reg', np.nan))
+                base['label_cls_gt'] = int(gt.get('label_cls', -1))
+                base['label_class_name_gt'] = str(gt.get('class_name', ''))
+                base['label_source_gt'] = str(gt.get('label_source', ''))
+
+                # backward compatibility: 舊 backend 讀這欄
+                if np.isfinite(base['label_reg_gt']):
+                    base['soft_target_proxy'] = float(base['label_reg_gt'])
+
+            out_rows.append(base)
+
+        pred_csv = self.out_dir / 'reliability_predictions.csv'
+        summary_json = self.out_dir / 'summary.json'
+
+        fieldnames = [
+            'pair_id',
+            'start_pair_id',
+            'end_pair_id',
+
+            'kf_prev_id',
+            'kf_curr_id',
+            'src_prev_id',
+            'src_curr_id',
+            'image_prev',
+            'image_curr',
+            'timestamp_prev',
+            'timestamp_curr',
+            'accepted',
+            'reason',
+
+            'has_prediction',
+            'w_pred',
+
+            'pred_class_id',
+            'pred_class',
+            'p_harmful',
+            'p_neutral',
+            'p_helpful',
+
+            # backward compatibility
+            'gate_pass',
+            'soft_target_proxy',
+
+            'gate_pass_tau',
+            'gate_pass_helpful_prob',
+            'gate_pass_by_class',
+
+            'label_reg_gt',
+            'label_cls_gt',
+            'label_class_name_gt',
+            'label_source_gt',
+        ]
+
+        with open(pred_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in out_rows:
+                writer.writerow(row)
+
+        num_total_pairs = int(len(out_rows))
+        num_with_prediction = int(sum(int(r['has_prediction']) for r in out_rows))
+        num_gate_pass_tau = int(sum(int(r['gate_pass_tau']) for r in out_rows))
+        num_gate_pass_helpful_prob = int(sum(int(r['gate_pass_helpful_prob']) for r in out_rows))
+        num_gate_pass_by_class = int(sum(int(r['gate_pass_by_class']) for r in out_rows))
+
+        pred_class_counts = {}
+        for row in out_rows:
+            cname = row['pred_class']
+            if cname == '':
+                continue
+            pred_class_counts[cname] = pred_class_counts.get(cname, 0) + 1
+
+        gt_overlap = 0
+        if len(label_map) > 0:
+            gt_overlap = int(sum(1 for r in out_rows if np.isfinite(to_float(r['label_reg_gt'], np.nan),)))
+
         summary = {
             'sequence_dir': str(self.sequence_dir),
             'feature_csv': str(self.feature_csv),
             'dataset_dir': str(self.dataset_dir),
             'checkpoint': str(self.checkpoint),
-            'num_predictions': int(len(preds)),
+            'model_config_json': str(self.model_config_json),
+            'stats_json': str(self.stats_json),
+            'label_csv': str(self.label_csv),
+            'pred_csv': str(pred_csv),
+
+            'model_type': str(self.model_type),
+            'seq_len': int(self.seq_len),
+            'input_dim': int(X.shape[1]),
+            'num_classes': int(self.num_classes),
+
             'tau': float(self.tau),
-            'w_pred_mean': float(np.mean(preds)) if len(preds) > 0 else 0.0,
-            'w_pred_std': float(np.std(preds)) if len(preds) > 0 else 0.0,
-            'gate_pass_count': int(np.sum(preds >= self.tau)),
-            'gate_pass_ratio': float(np.mean(preds >= self.tau)) if len(preds) > 0 else 0.0,
+            'helpful_prob_thr': float(self.helpful_prob_thr),
+            'batch_size': int(self.batch_size),
+
+            'num_total_pairs': int(num_total_pairs),
+            'num_with_prediction': int(num_with_prediction),
+            'num_without_prediction': int(num_total_pairs - num_with_prediction),
+            'num_gate_pass_tau': int(num_gate_pass_tau),
+            'num_gate_pass_helpful_prob': int(num_gate_pass_helpful_prob),
+            'num_gate_pass_by_class': int(num_gate_pass_by_class),
+            'pred_class_counts': pred_class_counts,
+            'gt_overlap_rows': int(gt_overlap),
         }
 
-        summary_path = self.out_dir / 'summary.json'
-        with open(summary_path, 'w', encoding='utf-8') as f:
+        with open(summary_json, 'w', encoding='utf-8') as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
-        return summary_path
-
-    def run(self):
-        self.check_required_files()
-
-        meta = self.load_stats_and_checkpoint()
-        rows = self.read_csv_rows(self.feature_csv)
-
-        table = self.build_feature_table(rows, meta['feature_names'])
-        X_raw = self.apply_fill_values(table, meta['feature_names'], meta['stats']['fill_values'])
-
-        X_seq, seq_meta = self.build_sequences(
-            X_raw,
-            table['pair_ids'],
-            seq_len=meta['seq_len']
-        )
-
-        if len(X_seq) == 0:
-            raise RuntimeError(
-                f'建立 sequence 後為空，請確認 feature rows 數量與 seq_len={meta["seq_len"]}'
-            )
-
-        X_seq = self.standardize_sequences(
-            X_seq,
-            mean=meta['stats']['standardize_mean'],
-            std=meta['stats']['standardize_std']
-        )
-
-        model = self.build_model_from_checkpoint(meta)
-        preds = self.infer_in_batches(model, X_seq)
-
-        out_csv = self.out_dir / 'reliability_predictions.csv'
-        self.save_prediction_csv(out_csv, seq_meta, table, preds)
-        summary_path = self.save_summary(preds)
-
-        print(f'完成，reliability 推論輸出到: {out_csv}')
-        print(f'summary: {summary_path}')
+        print('========== Infer Reliability v2 Finished ==========')
+        print(f'pred_csv: {pred_csv}')
+        print(f'summary_json: {summary_json}')
+        for k, v in summary.items():
+            if isinstance(v, dict):
+                print(f'{k}: {v}')
+            elif k not in ['sequence_dir', 'feature_csv', 'dataset_dir', 'checkpoint', 'model_config_json', 'stats_json', 'label_csv', 'pred_csv']:
+                print(f'{k}: {v}')
 
         return {
-            'prediction_csv': out_csv,
-            'summary_json': summary_path,
-            'num_predictions': int(len(preds)),
+            'pred_csv': str(pred_csv),
+            'summary_json': str(summary_json),
+            'num_total_pairs': int(num_total_pairs),
+            'num_with_prediction': int(num_with_prediction),
+            'num_gate_pass_tau': int(num_gate_pass_tau),
+            'num_gate_pass_helpful_prob': int(num_gate_pass_helpful_prob),
+            'num_gate_pass_by_class': int(num_gate_pass_by_class),
+            'pred_class_counts': pred_class_counts,
         }
 
+
+# =========================================================
+# CLI
+# =========================================================
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--sequence_dir', type=str, required=True, help='例如: /mnt/sata4t/dataset/sequence_001')
-    parser.add_argument('--feature_csv', type=str, default='', help='若留空，預設用 sequence_dir/features/local_visual_features.csv')
-    parser.add_argument('--dataset_dir', type=str, default='', help='若留空，預設用 sequence_dir/reliability_dataset')
-    parser.add_argument('--checkpoint', type=str, default='', help='若留空，預設用 dataset_dir/model_runs/gru/best.pt')
-    parser.add_argument('--out_dir', type=str, default='', help='若留空，預設輸出到 sequence_dir/reliability_inference')
-    parser.add_argument('--tau', type=float, default=0.5, help='hard gate 門檻')
+    parser.add_argument(
+        '--sequence_dir',
+        type=str,
+        required=True,
+        help='例如: /mnt/sata4t/dataset/sequence_001'
+    )
+    parser.add_argument(
+        '--feature_csv',
+        type=str,
+        default='',
+        help='若留空，預設 sequence_dir/features/all_candidate_features.csv'
+    )
+    parser.add_argument(
+        '--dataset_dir',
+        type=str,
+        default='',
+        help='若留空，預設 sequence_dir/reliability_dataset'
+    )
+    parser.add_argument(
+        '--checkpoint',
+        type=str,
+        default='',
+        help='若留空，預設 dataset_dir/model_runs/model_type/best.pt'
+    )
+    parser.add_argument(
+        '--out_dir',
+        type=str,
+        default='',
+        help='若留空，預設 sequence_dir/reliability_inference'
+    )
+    parser.add_argument(
+        '--label_csv',
+        type=str,
+        default='',
+        help='若留空，預設 sequence_dir/reliability_labels/reliability_labels.csv'
+    )
+
+    parser.add_argument('--tau', type=float, default=0.5, help='regression gate threshold')
+    parser.add_argument('--helpful_prob_thr', type=float, default=0.5, help='classification helpful probability threshold')
     parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--device', type=str, default='')
+
+    # fallback config when model_config.json 不存在
+    parser.add_argument('--model_type', type=str, default='gru', choices=['mlp', 'gru', 'tcn'])
+    parser.add_argument('--hidden_dim', type=int, default=64)
+    parser.add_argument('--num_layers', type=int, default=1)
+    parser.add_argument('--dropout', type=float, default=0.10)
+    parser.add_argument('--num_classes', type=int, default=3)
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    device = args.device.strip() if args.device.strip() != '' else None
 
     inferencer = ReliabilityInferencer(
         sequence_dir=args.sequence_dir,
@@ -369,9 +634,17 @@ def main():
         dataset_dir=args.dataset_dir,
         checkpoint=args.checkpoint,
         out_dir=args.out_dir,
+        label_csv=args.label_csv,
         tau=args.tau,
+        helpful_prob_thr=args.helpful_prob_thr,
         batch_size=args.batch_size,
-        device=args.device,
+        device=device,
+
+        model_type=args.model_type,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        num_classes=args.num_classes,
     )
     inferencer.run()
 

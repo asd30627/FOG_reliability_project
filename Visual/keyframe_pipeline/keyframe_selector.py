@@ -1,6 +1,8 @@
+import argparse
 import csv
 import math
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -9,7 +11,7 @@ import yaml
 from matcher import LightGlueMatcher
 
 
-ACCEPTED_PAIR_CACHE_HEADER = [
+ALL_CANDIDATE_PAIR_HEADER = [
     'pair_id',
     'kf_prev_id',
     'kf_curr_id',
@@ -19,6 +21,14 @@ ACCEPTED_PAIR_CACHE_HEADER = [
     'image_curr',
     'timestamp_prev',
     'timestamp_curr',
+
+    'accepted',
+    'reason',
+    'has_motion_info',
+    'prefilter_pass',
+    'matcher_success',
+    'visual_pass',
+    'motion_pass',
 
     'odom_translation_m',
     'odom_rotation_deg',
@@ -34,7 +44,6 @@ ACCEPTED_PAIR_CACHE_HEADER = [
     'coverage1',
     'parallax_mean_px',
     'parallax_median_px',
-
     'geo_error_mean',
     'geo_error_median',
 
@@ -43,6 +52,30 @@ ACCEPTED_PAIR_CACHE_HEADER = [
     'e_rot_iv_deg',
     'e_trans_dir_iv_deg',
 ]
+
+
+# =========================================================
+# 基本工具
+# =========================================================
+
+def to_float(value, default=np.nan):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def to_int(value, default=-1):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def to_str(value, default=''):
+    if value is None:
+        return default
+    return str(value)
 
 
 def compute_translation(row0, row1):
@@ -96,7 +129,7 @@ def load_camera_matrix(camera_info_path: Path, image_shape=None):
         with open(camera_info_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
 
-        if 'camera_matrix' in data and 'data' in data['camera_matrix']:
+        if isinstance(data, dict) and 'camera_matrix' in data and 'data' in data['camera_matrix']:
             k = data['camera_matrix']['data']
             K = np.array(k, dtype=np.float64).reshape(3, 3)
             return K
@@ -128,7 +161,7 @@ def compute_row_rotation_matrix(row):
             row['quat_x'],
             row['quat_y'],
             row['quat_z'],
-            row['quat_w']
+            row['quat_w'],
         )
     except Exception:
         return None
@@ -144,7 +177,7 @@ def compute_translation_from_rows(row0, row1):
     return np.array([
         row1['pos_x'] - row0['pos_x'],
         row1['pos_y'] - row0['pos_y'],
-        row1['pos_z'] - row0['pos_z']
+        row1['pos_z'] - row0['pos_z'],
     ], dtype=np.float64)
 
 
@@ -261,7 +294,7 @@ def estimate_visual_geometry(pts0, pts1, K, min_matches_for_geometry=8):
         pts1,
         method=cv2.FM_RANSAC,
         ransacReprojThreshold=1.0,
-        confidence=0.999
+        confidence=0.999,
     )
 
     E, mask_e = cv2.findEssentialMat(
@@ -270,7 +303,7 @@ def estimate_visual_geometry(pts0, pts1, K, min_matches_for_geometry=8):
         cameraMatrix=K,
         method=cv2.RANSAC,
         prob=0.999,
-        threshold=1.0
+        threshold=1.0,
     )
 
     E = extract_first_essential_matrix(E)
@@ -312,32 +345,95 @@ def estimate_visual_geometry(pts0, pts1, K, min_matches_for_geometry=8):
     return result
 
 
+def read_frame_rows(path: Path) -> List[Dict[str, object]]:
+    rows = []
+    with open(path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            parsed = dict(row)
+
+            if 'keyframe_id' in row:
+                parsed['keyframe_id'] = to_int(row.get('keyframe_id', -1), -1)
+            else:
+                parsed['keyframe_id'] = -1
+
+            if 'source_frame_id' in row:
+                parsed['source_frame_id'] = to_int(row.get('source_frame_id', -1), -1)
+            else:
+                parsed['source_frame_id'] = -1
+
+            parsed['pos_x'] = float(to_float(row.get('pos_x', 0.0), 0.0))
+            parsed['pos_y'] = float(to_float(row.get('pos_y', 0.0), 0.0))
+            parsed['pos_z'] = float(to_float(row.get('pos_z', 0.0), 0.0))
+
+            parsed['quat_x'] = float(to_float(row.get('quat_x', 0.0), 0.0))
+            parsed['quat_y'] = float(to_float(row.get('quat_y', 0.0), 0.0))
+            parsed['quat_z'] = float(to_float(row.get('quat_z', 0.0), 0.0))
+            parsed['quat_w'] = float(to_float(row.get('quat_w', 1.0), 1.0))
+
+            parsed['yaw_deg'] = float(to_float(row.get('yaw_deg', 0.0), 0.0))
+            parsed['image_file'] = to_str(row.get('image_file', ''))
+            parsed['timestamp_token'] = to_str(row.get('timestamp_token', ''))
+
+            rows.append(parsed)
+
+    def sort_key(x):
+        if x['source_frame_id'] >= 0:
+            return x['source_frame_id']
+        if x['keyframe_id'] >= 0:
+            return x['keyframe_id']
+        return 0
+
+    rows.sort(key=sort_key)
+    return rows
+
+
+def resolve_image_path(images_dir: Path, image_file: str) -> Path:
+    p = Path(image_file)
+    if p.is_absolute():
+        return p
+    return images_dir / image_file
+
+
+# =========================================================
+# KeyframeSelector
+# =========================================================
+
 class KeyframeSelector:
+    """
+    v2 重點：
+    1. update(frame_packet) 保留 online 用法
+    2. 每個 candidate pair 都寫入 all_candidate_pairs.csv
+    3. accepted / reject_visual / reject_motion / prefilter_skip / matcher_fail 全部保留
+    4. 不再使用舊版 matcher.extract / match_features，統一改成 matcher.match(img0, img1)
+    """
+
     def __init__(
         self,
-        prefilter_translation_m=0.20,
-        prefilter_rotation_deg=2.0,
-        min_matches=120,
-        min_inlier_ratio=0.30,
-        min_translation_m=0.50,
-        min_rotation_deg=5.0,
+        prefilter_translation_m: float = 0.20,
+        prefilter_rotation_deg: float = 2.0,
+        min_matches: int = 120,
+        min_inlier_ratio: float = 0.30,
+        min_translation_m: float = 0.50,
+        min_rotation_deg: float = 5.0,
         matcher=None,
-        cache_csv_path='',
-        camera_info_path='',
-        grid_rows=4,
-        grid_cols=4,
-        min_matches_for_geometry=8,
+        candidate_csv_path: str = '',
+        camera_info_path: str = '',
+        grid_rows: int = 4,
+        grid_cols: int = 4,
+        min_matches_for_geometry: int = 8,
+        auto_init_csv: bool = True,
     ):
-        self.prefilter_translation_m = prefilter_translation_m
-        self.prefilter_rotation_deg = prefilter_rotation_deg
-        self.min_matches = min_matches
-        self.min_inlier_ratio = min_inlier_ratio
-        self.min_translation_m = min_translation_m
-        self.min_rotation_deg = min_rotation_deg
+        self.prefilter_translation_m = float(prefilter_translation_m)
+        self.prefilter_rotation_deg = float(prefilter_rotation_deg)
+        self.min_matches = int(min_matches)
+        self.min_inlier_ratio = float(min_inlier_ratio)
+        self.min_translation_m = float(min_translation_m)
+        self.min_rotation_deg = float(min_rotation_deg)
 
         self.matcher = matcher or LightGlueMatcher()
 
-        self.cache_csv_path = Path(cache_csv_path).expanduser().resolve() if cache_csv_path else None
+        self.candidate_csv_path = Path(candidate_csv_path).expanduser().resolve() if candidate_csv_path else None
         self.camera_info_path = Path(camera_info_path).expanduser().resolve() if camera_info_path else None
         self.grid_rows = int(grid_rows)
         self.grid_cols = int(grid_cols)
@@ -345,26 +441,25 @@ class KeyframeSelector:
 
         self.last_kf_row = None
         self.last_kf_img = None
-        self.last_kf_feats = None
         self.keyframe_id = 0
+        self.candidate_pair_id = 0
         self.K = None
 
-        if self.cache_csv_path is not None:
-            self._init_cache_file()
+        if auto_init_csv and self.candidate_csv_path is not None:
+            self._init_candidate_file()
 
-    def _init_cache_file(self):
-        self.cache_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.cache_csv_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=ACCEPTED_PAIR_CACHE_HEADER)
+    def _init_candidate_file(self):
+        self.candidate_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.candidate_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=ALL_CANDIDATE_PAIR_HEADER)
             writer.writeheader()
 
-    def _append_cache_row(self, cache_row):
-        if self.cache_csv_path is None:
+    def _append_candidate_row(self, row: Dict[str, object]):
+        if self.candidate_csv_path is None:
             return
-
-        with open(self.cache_csv_path, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=ACCEPTED_PAIR_CACHE_HEADER)
-            writer.writerow(cache_row)
+        with open(self.candidate_csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=ALL_CANDIDATE_PAIR_HEADER)
+            writer.writerow(row)
 
     def _ensure_camera_matrix(self, img_shape):
         if self.K is not None:
@@ -374,21 +469,52 @@ class KeyframeSelector:
             self.K = load_camera_matrix(Path(''), image_shape=img_shape)
         else:
             self.K = load_camera_matrix(self.camera_info_path, image_shape=img_shape)
-
         return self.K
 
-    def _build_accepted_pair_cache(
-        self,
-        prev_row,
-        curr_row,
-        prev_img,
-        curr_img,
-        match_result,
-        translation_m,
-        rotation_deg,
-        kf_prev_id,
-        kf_curr_id,
-    ):
+    def _base_candidate_row(self, prev_row, curr_row, translation_m, rotation_deg):
+        return {
+            'pair_id': int(self.candidate_pair_id),
+            'kf_prev_id': int(max(self.keyframe_id - 1, 0)),
+            'kf_curr_id': -1,
+            'src_prev_id': int(to_int(prev_row.get('source_frame_id', -1), -1)),
+            'src_curr_id': int(to_int(curr_row.get('source_frame_id', -1), -1)),
+            'image_prev': to_str(prev_row.get('image_file', '')),
+            'image_curr': to_str(curr_row.get('image_file', '')),
+            'timestamp_prev': to_str(prev_row.get('timestamp_token', '')),
+            'timestamp_curr': to_str(curr_row.get('timestamp_token', '')),
+
+            'accepted': 0,
+            'reason': '',
+            'has_motion_info': 0,
+            'prefilter_pass': 0,
+            'matcher_success': 0,
+            'visual_pass': 0,
+            'motion_pass': 0,
+
+            'odom_translation_m': float(translation_m) if translation_m is not None else -1.0,
+            'odom_rotation_deg': float(rotation_deg) if rotation_deg is not None else -1.0,
+
+            'num_keypoints0': -1,
+            'num_keypoints1': -1,
+            'num_matches': -1,
+            'num_inliers': -1,
+            'match_inlier_ratio': -1.0,
+            'mean_match_score': -1.0,
+
+            'coverage0': -1.0,
+            'coverage1': -1.0,
+            'parallax_mean_px': -1.0,
+            'parallax_median_px': -1.0,
+            'geo_error_mean': -1.0,
+            'geo_error_median': -1.0,
+
+            'vis_pose_ok': 0,
+            'vis_rot_deg': -1.0,
+            'e_rot_iv_deg': -1.0,
+            'e_trans_dir_iv_deg': -1.0,
+        }
+
+    def _fill_visual_metrics(self, out_row, prev_row, curr_row, prev_img, curr_img, match_result):
         K = self._ensure_camera_matrix(prev_img.shape)
 
         pts0 = match_result['mkpts0']
@@ -399,12 +525,16 @@ class KeyframeSelector:
             pts0,
             pts1,
             K,
-            min_matches_for_geometry=self.min_matches_for_geometry
+            min_matches_for_geometry=self.min_matches_for_geometry,
         )
 
         pose_mask = geo['pose_mask']
-        inlier_pts0 = pts0[pose_mask] if len(pose_mask) == len(pts0) else pts0
-        inlier_pts1 = pts1[pose_mask] if len(pose_mask) == len(pts1) else pts1
+        if len(pose_mask) == len(pts0):
+            inlier_pts0 = pts0[pose_mask]
+            inlier_pts1 = pts1[pose_mask]
+        else:
+            inlier_pts0 = pts0
+            inlier_pts1 = pts1
 
         if len(match_scores) > 0 and len(pose_mask) == len(match_scores):
             valid_scores = match_scores[pose_mask]
@@ -418,14 +548,9 @@ class KeyframeSelector:
 
         coverage0 = compute_coverage(inlier_pts0, w0, h0, rows=self.grid_rows, cols=self.grid_cols)
         coverage1 = compute_coverage(inlier_pts1, w1, h1, rows=self.grid_rows, cols=self.grid_cols)
-
         parallax_mean_px, parallax_median_px = compute_parallax_stats(inlier_pts0, inlier_pts1)
 
         R_odom_rel, t_odom_rel = compute_odom_relative_pose(prev_row, curr_row)
-
-        odom_translation_m = float(translation_m) if translation_m is not None else -1.0
-        odom_rotation_deg = float(rotation_deg) if rotation_deg is not None else -1.0
-
         if geo['pose_ok'] and R_odom_rel is not None and t_odom_rel is not None:
             e_rot_iv_deg = rotation_distance_deg(geo['R_vis'], R_odom_rel)
             e_trans_dir_iv_deg = vector_angle_deg(geo['t_vis_unit'], t_odom_rel)
@@ -433,20 +558,7 @@ class KeyframeSelector:
             e_rot_iv_deg = -1.0
             e_trans_dir_iv_deg = -1.0
 
-        cache_row = {
-            'pair_id': int(kf_prev_id),
-            'kf_prev_id': int(kf_prev_id),
-            'kf_curr_id': int(kf_curr_id),
-            'src_prev_id': int(prev_row.get('source_frame_id', -1)),
-            'src_curr_id': int(curr_row.get('source_frame_id', -1)),
-            'image_prev': prev_row.get('image_file', ''),
-            'image_curr': curr_row.get('image_file', ''),
-            'timestamp_prev': prev_row.get('timestamp_token', ''),
-            'timestamp_curr': curr_row.get('timestamp_token', ''),
-
-            'odom_translation_m': odom_translation_m,
-            'odom_rotation_deg': odom_rotation_deg,
-
+        out_row.update({
             'num_keypoints0': int(match_result['num_keypoints0']),
             'num_keypoints1': int(match_result['num_keypoints1']),
             'num_matches': int(match_result['num_matches']),
@@ -466,36 +578,32 @@ class KeyframeSelector:
             'vis_rot_deg': float(geo['vis_rot_deg']),
             'e_rot_iv_deg': float(e_rot_iv_deg),
             'e_trans_dir_iv_deg': float(e_trans_dir_iv_deg),
-        }
-
-        return cache_row
+        })
+        return out_row
 
     def reset(self):
         self.last_kf_row = None
         self.last_kf_img = None
-        self.last_kf_feats = None
         self.keyframe_id = 0
+        self.candidate_pair_id = 0
         self.K = None
 
-        if self.cache_csv_path is not None:
-            self._init_cache_file()
+        if self.candidate_csv_path is not None:
+            self._init_candidate_file()
 
     def update(self, frame_packet):
         if frame_packet is None:
             raise ValueError('frame_packet 是 None')
-
         if 'image_bgr' not in frame_packet:
             raise ValueError("frame_packet 缺少 'image_bgr'")
-
         img = frame_packet['image_bgr']
         if img is None:
             raise ValueError("frame_packet['image_bgr'] 是 None")
 
         source_frame_id = frame_packet.get('source_frame_id', -1)
 
+        # 第一張直接作為起始 keyframe，不產生 pair row
         if self.last_kf_row is None:
-            curr_feats = self.matcher.extract(img)
-
             result = {
                 'accepted': True,
                 'reason': 'first_frame',
@@ -506,56 +614,46 @@ class KeyframeSelector:
                 'num_matches': -1,
                 'inlier_ratio': -1.0,
                 'match_result': None,
-                'accepted_pair_cache': None,
-                'cache_written': False,
-                'cache_error': '',
+                'candidate_row': None,
+                'csv_written': False,
             }
-
             self.last_kf_row = frame_packet
             self.last_kf_img = img
-            self.last_kf_feats = curr_feats
             self.keyframe_id += 1
             return result
 
-        translation_m = compute_translation(self.last_kf_row, frame_packet)
-        rotation_deg = compute_rotation_deg(self.last_kf_row, frame_packet)
+        prev_row = self.last_kf_row
+        prev_img = self.last_kf_img
+
+        translation_m = compute_translation(prev_row, frame_packet)
+        rotation_deg = compute_rotation_deg(prev_row, frame_packet)
 
         has_motion_info = (translation_m is not None) or (rotation_deg is not None)
+        out_row = self._base_candidate_row(prev_row, frame_packet, translation_m, rotation_deg)
+        out_row['has_motion_info'] = int(has_motion_info)
 
         too_small_translation = (translation_m is not None and translation_m < self.prefilter_translation_m)
         too_small_rotation = (rotation_deg is not None and rotation_deg < self.prefilter_rotation_deg)
 
+        prefilter_pass = True
         if has_motion_info:
             checks = []
             if translation_m is not None:
                 checks.append(too_small_translation)
             if rotation_deg is not None:
                 checks.append(too_small_rotation)
-
             if len(checks) > 0 and all(checks):
-                return {
-                    'accepted': False,
-                    'reason': 'prefilter_skip',
-                    'keyframe_id': None,
-                    'source_frame_id': source_frame_id,
-                    'translation_m': translation_m,
-                    'rotation_deg': rotation_deg,
-                    'num_matches': 0,
-                    'inlier_ratio': 0.0,
-                    'match_result': None,
-                    'accepted_pair_cache': None,
-                    'cache_written': False,
-                    'cache_error': '',
-                }
+                prefilter_pass = False
 
-        curr_feats = self.matcher.extract(img)
+        out_row['prefilter_pass'] = int(prefilter_pass)
 
-        try:
-            result = self.matcher.match_features(self.last_kf_feats, curr_feats)
-        except Exception as e:
+        if not prefilter_pass:
+            out_row['reason'] = 'prefilter_skip'
+            self._append_candidate_row(out_row)
+            self.candidate_pair_id += 1
             return {
                 'accepted': False,
-                'reason': f'matcher_fail: {e}',
+                'reason': 'prefilter_skip',
                 'keyframe_id': None,
                 'source_frame_id': source_frame_id,
                 'translation_m': translation_m,
@@ -563,91 +661,278 @@ class KeyframeSelector:
                 'num_matches': 0,
                 'inlier_ratio': 0.0,
                 'match_result': None,
-                'accepted_pair_cache': None,
-                'cache_written': False,
-                'cache_error': '',
+                'candidate_row': out_row,
+                'csv_written': self.candidate_csv_path is not None,
             }
 
-        enough_visual = (
-            result['num_matches'] >= self.min_matches and
-            result['inlier_ratio'] >= self.min_inlier_ratio
+        try:
+            match_result = self.matcher.match(prev_img, img)
+            out_row['matcher_success'] = 1
+        except Exception as e:
+            out_row['reason'] = f'matcher_fail: {e}'
+            self._append_candidate_row(out_row)
+            self.candidate_pair_id += 1
+            return {
+                'accepted': False,
+                'reason': out_row['reason'],
+                'keyframe_id': None,
+                'source_frame_id': source_frame_id,
+                'translation_m': translation_m,
+                'rotation_deg': rotation_deg,
+                'num_matches': 0,
+                'inlier_ratio': 0.0,
+                'match_result': None,
+                'candidate_row': out_row,
+                'csv_written': self.candidate_csv_path is not None,
+            }
+
+        out_row = self._fill_visual_metrics(
+            out_row,
+            prev_row=prev_row,
+            curr_row=frame_packet,
+            prev_img=prev_img,
+            curr_img=img,
+            match_result=match_result,
+        )
+
+        visual_pass = (
+            out_row['num_matches'] >= self.min_matches and
+            out_row['match_inlier_ratio'] >= self.min_inlier_ratio
         )
 
         if not has_motion_info:
-            enough_motion = True
+            motion_pass = True
         else:
             motion_checks = []
             if translation_m is not None:
                 motion_checks.append(translation_m >= self.min_translation_m)
             if rotation_deg is not None:
                 motion_checks.append(rotation_deg >= self.min_rotation_deg)
+            motion_pass = any(motion_checks) if len(motion_checks) > 0 else True
 
-            enough_motion = any(motion_checks) if len(motion_checks) > 0 else True
+        out_row['visual_pass'] = int(visual_pass)
+        out_row['motion_pass'] = int(motion_pass)
 
-        if enough_visual and enough_motion:
-            kf_prev_id = self.keyframe_id - 1
-            kf_curr_id = self.keyframe_id
-
-            accepted_pair_cache = None
-            cache_written = False
-            cache_error = ''
-
-            try:
-                accepted_pair_cache = self._build_accepted_pair_cache(
-                    prev_row=self.last_kf_row,
-                    curr_row=frame_packet,
-                    prev_img=self.last_kf_img,
-                    curr_img=img,
-                    match_result=result,
-                    translation_m=translation_m,
-                    rotation_deg=rotation_deg,
-                    kf_prev_id=kf_prev_id,
-                    kf_curr_id=kf_curr_id,
-                )
-                self._append_cache_row(accepted_pair_cache)
-                cache_written = self.cache_csv_path is not None
-            except Exception as e:
-                cache_error = str(e)
-
-            decision = {
-                'accepted': True,
-                'reason': 'accept',
-                'keyframe_id': self.keyframe_id,
-                'source_frame_id': source_frame_id,
-                'translation_m': translation_m,
-                'rotation_deg': rotation_deg,
-                'num_matches': result['num_matches'],
-                'inlier_ratio': result['inlier_ratio'],
-                'match_result': result,
-                'accepted_pair_cache': accepted_pair_cache,
-                'cache_written': cache_written,
-                'cache_error': cache_error,
-            }
+        accepted = bool(visual_pass and motion_pass)
+        if accepted:
+            out_row['accepted'] = 1
+            out_row['reason'] = 'accept'
+            out_row['kf_curr_id'] = int(self.keyframe_id)
 
             self.last_kf_row = frame_packet
             self.last_kf_img = img
-            self.last_kf_feats = curr_feats
+            accepted_keyframe_id = self.keyframe_id
             self.keyframe_id += 1
-            return decision
-
-        if not enough_visual and not enough_motion:
-            reason = 'reject_visual_and_motion'
-        elif not enough_visual:
-            reason = 'reject_visual'
         else:
-            reason = 'reject_motion'
+            if not visual_pass and not motion_pass:
+                out_row['reason'] = 'reject_visual_and_motion'
+            elif not visual_pass:
+                out_row['reason'] = 'reject_visual'
+            else:
+                out_row['reason'] = 'reject_motion'
+            accepted_keyframe_id = None
+
+        self._append_candidate_row(out_row)
+        self.candidate_pair_id += 1
 
         return {
-            'accepted': False,
-            'reason': reason,
-            'keyframe_id': None,
+            'accepted': accepted,
+            'reason': out_row['reason'],
+            'keyframe_id': accepted_keyframe_id,
             'source_frame_id': source_frame_id,
             'translation_m': translation_m,
             'rotation_deg': rotation_deg,
-            'num_matches': result['num_matches'],
-            'inlier_ratio': result['inlier_ratio'],
-            'match_result': result,
-            'accepted_pair_cache': None,
-            'cache_written': False,
-            'cache_error': '',
+            'num_matches': int(out_row['num_matches']),
+            'inlier_ratio': float(out_row['match_inlier_ratio']),
+            'match_result': match_result,
+            'candidate_row': out_row,
+            'csv_written': self.candidate_csv_path is not None,
         }
+
+
+# =========================================================
+# Batch Runner
+# =========================================================
+
+class KeyframeSelectionBatchRunner:
+    """
+    用一份 frames_csv + images_dir，批次產生 all_candidate_pairs.csv
+
+    注意：
+    - 如果 frames_csv 是「全部原始 frame」，那輸出的 all_candidate_pairs 才是完整候選。
+    - 如果 frames_csv 其實只是已經篩過的 keyframes.csv，
+      那輸出的 all_candidate_pairs 只會覆蓋這份 csv 內的 row。
+    """
+
+    def __init__(
+        self,
+        sequence_dir,
+        frames_csv='',
+        images_dir='',
+        out_csv='',
+        camera_info='',
+        prefilter_translation_m=0.20,
+        prefilter_rotation_deg=2.0,
+        min_matches=120,
+        min_inlier_ratio=0.30,
+        min_translation_m=0.50,
+        min_rotation_deg=5.0,
+        grid_rows=4,
+        grid_cols=4,
+        min_matches_for_geometry=8,
+    ):
+        self.sequence_dir = Path(sequence_dir).expanduser().resolve()
+        self.frames_csv = Path(frames_csv).expanduser().resolve() if frames_csv else self.sequence_dir / 'keyframes' / 'keyframes.csv'
+        self.images_dir = Path(images_dir).expanduser().resolve() if images_dir else self.sequence_dir / 'keyframes' / 'images'
+        self.out_csv = Path(out_csv).expanduser().resolve() if out_csv else self.sequence_dir / 'keyframes' / 'all_candidate_pairs.csv'
+        self.camera_info = Path(camera_info).expanduser().resolve() if camera_info else self.sequence_dir / 'camera_info.yaml'
+
+        self.prefilter_translation_m = float(prefilter_translation_m)
+        self.prefilter_rotation_deg = float(prefilter_rotation_deg)
+        self.min_matches = int(min_matches)
+        self.min_inlier_ratio = float(min_inlier_ratio)
+        self.min_translation_m = float(min_translation_m)
+        self.min_rotation_deg = float(min_rotation_deg)
+        self.grid_rows = int(grid_rows)
+        self.grid_cols = int(grid_cols)
+        self.min_matches_for_geometry = int(min_matches_for_geometry)
+
+    def _check_inputs(self):
+        if not self.frames_csv.exists():
+            raise FileNotFoundError(f'找不到 frames_csv: {self.frames_csv}')
+        if not self.images_dir.exists():
+            raise FileNotFoundError(f'找不到 images_dir: {self.images_dir}')
+
+    def run(self):
+        self._check_inputs()
+
+        rows = read_frame_rows(self.frames_csv)
+        if len(rows) < 2:
+            raise RuntimeError(f'frames_csv row 數量不足，至少需要 2 筆，目前只有 {len(rows)}')
+
+        selector = KeyframeSelector(
+            prefilter_translation_m=self.prefilter_translation_m,
+            prefilter_rotation_deg=self.prefilter_rotation_deg,
+            min_matches=self.min_matches,
+            min_inlier_ratio=self.min_inlier_ratio,
+            min_translation_m=self.min_translation_m,
+            min_rotation_deg=self.min_rotation_deg,
+            matcher=LightGlueMatcher(),
+            candidate_csv_path=str(self.out_csv),
+            camera_info_path=str(self.camera_info),
+            grid_rows=self.grid_rows,
+            grid_cols=self.grid_cols,
+            min_matches_for_geometry=self.min_matches_for_geometry,
+            auto_init_csv=True,
+        )
+
+        num_accept = 0
+        num_prefilter_skip = 0
+        num_matcher_fail = 0
+        num_reject_visual = 0
+        num_reject_motion = 0
+        num_reject_both = 0
+        num_first_frame = 0
+
+        for idx, row in enumerate(rows):
+            img_path = resolve_image_path(self.images_dir, row['image_file'])
+            img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError(f'影像讀取失敗: {img_path}')
+
+            frame_packet = dict(row)
+            frame_packet['image_bgr'] = img
+
+            decision = selector.update(frame_packet)
+            reason = decision['reason']
+
+            if reason == 'first_frame':
+                num_first_frame += 1
+            elif reason == 'accept':
+                num_accept += 1
+            elif reason == 'prefilter_skip':
+                num_prefilter_skip += 1
+            elif str(reason).startswith('matcher_fail'):
+                num_matcher_fail += 1
+            elif reason == 'reject_visual':
+                num_reject_visual += 1
+            elif reason == 'reject_motion':
+                num_reject_motion += 1
+            elif reason == 'reject_visual_and_motion':
+                num_reject_both += 1
+
+            if (idx + 1) % 50 == 0:
+                print(f'processed frames: {idx + 1}/{len(rows)}')
+
+        summary = {
+            'sequence_dir': str(self.sequence_dir),
+            'frames_csv': str(self.frames_csv),
+            'images_dir': str(self.images_dir),
+            'out_csv': str(self.out_csv),
+            'num_input_rows': int(len(rows)),
+            'num_candidate_rows': int(max(len(rows) - 1, 0)),
+            'num_first_frame': int(num_first_frame),
+            'accept': int(num_accept),
+            'prefilter_skip': int(num_prefilter_skip),
+            'matcher_fail': int(num_matcher_fail),
+            'reject_visual': int(num_reject_visual),
+            'reject_motion': int(num_reject_motion),
+            'reject_visual_and_motion': int(num_reject_both),
+        }
+
+        print('========== Keyframe Selection Batch Finished ==========')
+        for k, v in summary.items():
+            print(f'{k}: {v}')
+
+        return summary
+
+
+# =========================================================
+# CLI
+# =========================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--sequence_dir', type=str, required=True, help='例如: /mnt/sata4t/dataset/sequence_001')
+    parser.add_argument('--frames_csv', type=str, default='', help='若留空，預設 sequence_dir/keyframes/keyframes.csv')
+    parser.add_argument('--images_dir', type=str, default='', help='若留空，預設 sequence_dir/keyframes/images')
+    parser.add_argument('--out_csv', type=str, default='', help='若留空，預設 sequence_dir/keyframes/all_candidate_pairs.csv')
+    parser.add_argument('--camera_info', type=str, default='', help='若留空，預設 sequence_dir/camera_info.yaml')
+
+    parser.add_argument('--prefilter_translation_m', type=float, default=0.20)
+    parser.add_argument('--prefilter_rotation_deg', type=float, default=2.0)
+    parser.add_argument('--min_matches', type=int, default=120)
+    parser.add_argument('--min_inlier_ratio', type=float, default=0.30)
+    parser.add_argument('--min_translation_m', type=float, default=0.50)
+    parser.add_argument('--min_rotation_deg', type=float, default=5.0)
+
+    parser.add_argument('--grid_rows', type=int, default=4)
+    parser.add_argument('--grid_cols', type=int, default=4)
+    parser.add_argument('--min_matches_for_geometry', type=int, default=8)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    runner = KeyframeSelectionBatchRunner(
+        sequence_dir=args.sequence_dir,
+        frames_csv=args.frames_csv,
+        images_dir=args.images_dir,
+        out_csv=args.out_csv,
+        camera_info=args.camera_info,
+        prefilter_translation_m=args.prefilter_translation_m,
+        prefilter_rotation_deg=args.prefilter_rotation_deg,
+        min_matches=args.min_matches,
+        min_inlier_ratio=args.min_inlier_ratio,
+        min_translation_m=args.min_translation_m,
+        min_rotation_deg=args.min_rotation_deg,
+        grid_rows=args.grid_rows,
+        grid_cols=args.grid_cols,
+        min_matches_for_geometry=args.min_matches_for_geometry,
+    )
+    runner.run()
+
+
+if __name__ == '__main__':
+    main()

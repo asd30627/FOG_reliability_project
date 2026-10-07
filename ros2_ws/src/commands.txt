@@ -1,4 +1,4 @@
-open isaac sim:
+#open isaac sim:
 isaacsim
 runapp
 export ROS_DOMAIN_ID=0
@@ -8,7 +8,7 @@ ROS:
 ros2 run pseudo_fog fog_spec_check_node
 ros2 run data_collector collector_node --ros-args -p sequence_name:=sequence_001
 
-Visaul:
+#Visaul:
 conda activate gf
 python ~/Lucas_ws/Visual/keyframe_pipeline/keyframe_selector.py --sequence_dir /mnt/sata4t/dataset/sequence_001
 
@@ -39,7 +39,7 @@ python run_pipeline.py \
   --model_type gru \
   --epochs 80
 
-navigation:
+#navigation:
 change parameter:
 /home/ivlab3/rgbd_ws/src/navigation2/nav2_bringup/params/
 cd rgbd_ws/
@@ -47,7 +47,8 @@ source install/setup.bash
 export ROS_DOMAIN_ID=0
 ros2 launch wavefront_explorer full_system.launch.py 
 
-orb-slam3:
+
+#orb-slam3:
 ros2 run orbslam3 rgbd /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/vocabulary/ORBvoc.txt.tar.gz /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/config/rgb-d/RealSense_D457.yaml
 
 terminal1:
@@ -55,5 +56,228 @@ ros2 launch realsense2_camera rs_rgbd_launch.py
 terminal2:
 ros2 run orbslam3 rgbd /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/vocabulary/ORBvoc.txt /home/ivlab3/orbslam_ws/src/orb-slam3-ros2/config/rgb-d/RealSense_D457.yaml
 
+#Euroc
+Terminal 1：RViz
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 launch vins vins_rviz.launch.xml
 
+Terminal 2：VINS
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 run vins vins_node ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/euroc/euroc_mono_imu_config.yaml --ros-args -p use_sim_time:=true
+
+Terminal (optional)：bag record
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+rm -rf ~/vins_eval_mh03
+ros2 bag record --topics /odometry -o ~/vins_eval_mh03
+
+Terminal 3：Bag playback
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 bag play --clock --loop ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/V1_02_medium
+
+Terminal 4:
+cd ~/vins_eval_results/MH_03_medium
+evo_traj bag2 ~/vins_eval_mh03 /odometry --save_as_tum
+evo_ape euroc \
+/mnt/sata4t/datasets/EuRoC_full/Machine_Hall_Datasets/machine_hall/MH_03_medium/mav0/state_groundtruth_estimate0/data.csv \
+odometry.tum \
+-va --plot --save_results ape_mh03.zip
+
+cd ~/vins_eval_results/MH_03_medium
+evo_rpe euroc \
+/mnt/sata4t/datasets/EuRoC_full/Machine_Hall_Datasets/machine_hall/MH_03_medium/mav0/state_groundtruth_estimate0/data.csv \
+odometry.tum \
+-va --plot --save_results rpe_mh03.zip
+
+
+#KAIST player:
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+conda activate gf312
+
+cd ~/vins_ws/src/Visual/keyframe_pipeline
+
+BASE=/mnt/sata4t/ivlab3_data/vins_project/results/kaist/fog/_combined_future_reliability_v41
+
+python3 reliability_infer_node.py --ros-args \
+  -p dataset_dir:=$BASE/dataset \
+  -p checkpoint:=$BASE/model_gru/best.pt \
+  -p model_config:=$BASE/model_gru/model_config.json \
+  -p stats_json:=$BASE/dataset/dataset_meta.json \
+  -p device:=cuda \
+  -p observer_only:=true \
+  -p min_soft_weight:=0.30 \
+  -p feature_topic:=/vins_admission/features_json \
+  -p prediction_topic:=/vins_admission/prediction \
+  -p prediction_json_topic:=/vins_admission/prediction_json \
+  -p publish_prediction_json:=true \
+  -p log_missing_features:=true
+  
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 run vins vins_node ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/kaist/kaist_stereo_xsens.yaml --ros-args -p use_sim_time:=true
+2>&1 | tee /mnt/sata4t/ivlab3_data/vins_project/results/admission_runtime_check.log
+
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 run loop_fusion loop_fusion_node ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/kaist/kaist_stereo_xsens.yaml --ros-args -p use_sim_time:=true
+
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 launch kaist_player kaist_player.launch.py \
+  config_file:=/home/ivlab3/vins_ws/src/kaist_player/config/urban28_pankyo_fog.yaml \
+  dataset_root:=/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo
+  
+python3 /mnt/sata4t/ivlab3_data/vins_project/tools/vio_csv_to_tum.py \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio.csv \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio.tum
+
+python3 /mnt/sata4t/ivlab3_data/vins_project/tools/vio_csv_to_tum.py \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio_loop.csv \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio_loop.tum
+
+evo_traj tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+"/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio_loop.tum" \
+--ref=/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+-a -p --plot_mode xyz
+
+evo_ape tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio.tum \
+-va -a
+
+evo_rpe tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio.tum \
+-va -a --delta 10 --delta_unit m
+
+evo_ape tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio_loop.tum \
+-va -a 
+
+evo_rpe tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban28-pankyo/pose/urban28-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/vio_loop.tum \
+-va -a --delta 10 --delta_unit m
+
+
+#train model
+1) 建 label：
+conda activate gf
+cd /home/ivlab3/Lucas_ws/Visual/keyframe_pipeline/
+python build_vins_reliability_labels.py \
+  --feature_csv /mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban29_pankyo/reliability_features_vins.csv \
+  --gt_path /mnt/sata4t/datasets/kaist_complex_urban/extracted/urban29-pankyo/pose/urban29-pankyo/global_pose.tum \
+  --out_dir /mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban29_pankyo/reliability_labels_vins
+
+2) 建 dataset：
+python build_vins_reliability_dataset.py \
+  --feature_csv /home/ivlab3/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/reliability_features_vins.csv \
+  --label_csv /home/ivlab3/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/reliability_labels_vins/reliability_labels_vins.csv \
+  --out_dir /home/ivlab3/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/reliability_dataset_vins \
+  --seq_len 8
+
+3) 訓練（沿用原本 train_reliability_model.py）：
+python train_reliability_model.py \
+  --dataset_dir /home/ivlab3/vins_project/results/vins_eval_results/KAIST_urban28_pankyo/reliability_dataset_vins \
+  --model_type gru \
+  --epochs 80
+  
+#sh
+cd /mnt/sata4t/ivlab3_data/vins_project/tools
+./run_many.sh
+
+cd /mnt/sata4t/ivlab3_data/vins_project/tools
+./view_metrics.sh imu
+
+
+
+cd ~/vins_ws
+colcon build --symlink-install
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+  
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 run vins vins_node ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/kaist/kaist_stereo_xsens.yaml --ros-args -p use_sim_time:=true
+
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 run loop_fusion loop_fusion_node ~/vins_ws/src/VINS-Fusion-ROS2-jazzy/config/kaist/kaist_stereo_xsens.yaml --ros-args -p use_sim_time:=true
+
+cd ~/vins_ws
+source /opt/ros/jazzy/setup.bash
+source ~/vins_ws/install/setup.bash
+ros2 launch kaist_player kaist_player.launch.py \
+  config_file:=/home/ivlab3/vins_ws/src/kaist_player/config/urban39_pankyo_fog.yaml \
+  dataset_root:=/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo
+  
+cd /home/ivlab3/vins_ws/scrips/
+SUDO_PASS='kangli0306' bash ./run_many.sh
+
+python3 /mnt/sata4t/ivlab3_data/vins_project/tools/vio_csv_to_tum.py \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio.csv \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio.tum
+
+python3 /mnt/sata4t/ivlab3_data/vins_project/tools/vio_csv_to_tum.py \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio_loop.csv \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio_loop.tum
+
+evo_traj tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+"/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio_loop.tum" \
+--ref=/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+-a -p --plot_mode xyz
+
+evo_ape tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio.tum \
+-va -a
+
+evo_rpe tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio.tum \
+-va -a --delta 10 --delta_unit m
+
+evo_ape tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio_loop.tum \
+-va -a 
+
+evo_rpe tum \
+/mnt/sata4t/datasets/kaist_complex_urban/extracted/urban39-pankyo/pose/urban39-pankyo/global_pose.tum \
+/mnt/sata4t/ivlab3_data/vins_project/results/vins_eval_results/KAIST_urban39_pankyo/vio_loop.tum \
+-va -a --delta 10 --delta_unit m
+
+
+
+cd /mnt/sata4t/datasets/isaac_sim/bags/
+ros2 bag record -o test_ekf_slow \
+  /tf \
+  /tf_static \
+  /vehicle_1/tf \
+  /vehicle_1/tf_static \
+  /vehicle_2/filter/quaternion \
+  /vehicle_2/imu \
+  /vehicle_2/imu/acceleration \
+  /vehicle_2/imu/angular_velocity \
+  /vehicle_2/imu/time_ref \
+  /vehicle_2/joint_states \
+  /vehicle_2/odom \
+  /vehicle_2/robot_description \
+  /vehicle_2/scan \
+  /vehicle_2/scan_raw \
+  /vehicle_2/tf \
+  /vehicle_2/tf_static \
+  /vehicle_2/urg_node2/transition_event
 
